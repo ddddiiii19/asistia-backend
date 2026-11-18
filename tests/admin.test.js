@@ -51,9 +51,10 @@ describe('Autenticacion y roles administrativos', () => {
     assert.equal(otra.body.error, 'fuera_de_alcance');
   });
 
-  test('RF-12: solo el administrador global crea, modifica y elimina informacion', async () => {
+  // Q8: el administrador de dependencia también modifica, pero solo lo de SU dependencia (ver q8-dependencias-personalizadas.test.js).
+  test('RF-12: el administrador global crea, modifica y elimina informacion; el de otra dependencia recibe 403', async () => {
     const nuevo = { id_dependencia: 3, titulo: 'Horario de atención', contenido: '[DATO DE PRUEBA] Atención por cita.' };
-    const prohibido = await ctx.api.post('/api/admin/informacion').set('Authorization', bienestar).send(nuevo);
+    const prohibido = await ctx.api.post('/api/admin/informacion').set('Authorization', registro).send(nuevo);
     assert.equal(prohibido.status, 403);
 
     const creado = await ctx.api.post('/api/admin/informacion').set('Authorization', global).send(nuevo);
@@ -62,8 +63,8 @@ describe('Autenticacion y roles administrativos', () => {
     const edit = await ctx.api.put(`/api/admin/informacion/${id}`).set('Authorization', global).send({ titulo: 'Horario', contenido: 'Nuevo contenido' });
     assert.equal(edit.status, 200);
     assert.equal(edit.body.titulo, 'Horario');
-    assert.equal((await ctx.api.put(`/api/admin/informacion/${id}`).set('Authorization', bienestar).send({ titulo: 'x', contenido: 'y' })).status, 403);
-    assert.equal((await ctx.api.delete(`/api/admin/informacion/${id}`).set('Authorization', bienestar)).status, 403);
+    assert.equal((await ctx.api.put(`/api/admin/informacion/${id}`).set('Authorization', registro).send({ titulo: 'x', contenido: 'y' })).status, 403);
+    assert.equal((await ctx.api.delete(`/api/admin/informacion/${id}`).set('Authorization', registro)).status, 403);
     assert.equal((await ctx.api.delete(`/api/admin/informacion/${id}`).set('Authorization', global)).status, 204);
     assert.equal((await ctx.api.delete(`/api/admin/informacion/${id}`).set('Authorization', global)).status, 404);
   });
@@ -76,12 +77,12 @@ describe('Autenticacion y roles administrativos', () => {
     assert.equal(depInexistente.body.error, 'referencia_invalida');
   });
 
-  test('RF-14: gestion de preguntas frecuentes con los mismos permisos', async () => {
+  test('RF-14: gestion de preguntas frecuentes con los mismos permisos (Q8: el de dependencia, solo en la suya)', async () => {
     const lista = await ctx.api.get('/api/admin/faq').set('Authorization', registro);
     assert.equal(lista.body.length, 1);
     assert.ok('frecuencia' in lista.body[0]);
     const nueva = { id_dependencia: 2, pregunta: '¿Cuánto tarda un certificado?', respuesta: '[DATO DE PRUEBA] Depende de la dependencia.' };
-    assert.equal((await ctx.api.post('/api/admin/faq').set('Authorization', registro).send(nueva)).status, 403);
+    assert.equal((await ctx.api.post('/api/admin/faq').set('Authorization', registro).send({ ...nueva, id_dependencia: 1 })).status, 403);
     const creada = await ctx.api.post('/api/admin/faq').set('Authorization', global).send(nueva);
     assert.equal(creada.status, 201);
     const id = creada.body.id_faq;

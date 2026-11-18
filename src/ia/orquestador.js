@@ -4,15 +4,17 @@
 // El escalamiento termina en una persona o contacto de la dependencia; no interviene otra IA.
 const { HttpError } = require('../errores');
 const { verificarRespaldo } = require('./verificacion');
+const { formatoRespuesta, FRASE_DEPENDENCIA_GENERICA } = require('./contacto');
 
 const MAX_HISTORIAL = 6;
 
+// Q8: el mensaje de escalamiento no nombra la dependencia ni incluye su contacto: ambos se muestran en sus propios
+// bloques (contacto y dependencia) del formato estándar de respuesta.
 function mensajeEscalamiento(dependencia) {
   if (!dependencia) {
     return 'No logré identificar con certeza la dependencia relacionada con tu consulta. Te recomiendo comunicarte con la dependencia correspondiente a través de los canales institucionales de TEINCO. Tu consulta quedó registrada como caso de escalamiento.';
   }
-  const contacto = dependencia.contacto_responsable ? ` Contacto: ${dependencia.contacto_responsable}.` : '';
-  return `No cuento con información suficiente para responder tu consulta con certeza. Te recomiendo comunicarte directamente con ${dependencia.nombre}.${contacto} Tu consulta quedó registrada como caso de escalamiento.`;
+  return `No cuento con información suficiente para responder tu consulta con certeza. Te recomiendo ${FRASE_DEPENDENCIA_GENERICA}. Tu consulta quedó registrada como caso de escalamiento.`;
 }
 
 // Respuestas fijas y breves para la cortesia (saludo, agradecimiento, despedida).
@@ -45,7 +47,7 @@ function crearOrquestador({ ia, pool }) {
       const h = await pool.query('SELECT emisor, contenido FROM mensaje WHERE id_conversacion = $1 ORDER BY id_mensaje DESC LIMIT $2', [idConversacion, MAX_HISTORIAL]);
       historial = h.rows.reverse();
     }
-    const dependencias = (await pool.query('SELECT id_dependencia, nombre, descripcion, contacto_responsable FROM dependencia ORDER BY id_dependencia')).rows;
+    const dependencias = (await pool.query('SELECT id_dependencia, nombre, descripcion, contacto_responsable, correos, telefono FROM dependencia ORDER BY id_dependencia')).rows;
 
     // 2. Interpretar y clasificar (servicio de IA generativa).
     const clasif = await llamarIA(ia.clasificar, { mensaje, historial, dependencias });
@@ -66,7 +68,7 @@ function crearOrquestador({ ia, pool }) {
         await cliente.query("INSERT INTO mensaje (id_conversacion, emisor, contenido) VALUES ($1, 'usuario', $2)", [idConv, mensaje]);
         await cliente.query("INSERT INTO mensaje (id_conversacion, emisor, contenido) VALUES ($1, 'asistente', $2)", [idConv, respuesta]);
         await cliente.query('COMMIT');
-        return { id_conversacion: idConv, respuesta, dependencia: null, escalada: false };
+        return { id_conversacion: idConv, ...formatoRespuesta({ mensaje: respuesta, dependencia: null }), escalada: false };
       } catch (err) {
         await cliente.query('ROLLBACK');
         throw err;
@@ -102,6 +104,7 @@ function crearOrquestador({ ia, pool }) {
     // 4. Verificar que la respuesta tenga respaldo en la informacion institucional.
     const verificacion = verificarRespaldo({ dependencia, contexto, salida });
     const escalada = !verificacion.ok;
+    // Q8: se guarda solo el mensaje; el contacto (correo y teléfono) y la dependencia se componen aparte al responder y al mostrar el historial.
     const textoRespuesta = escalada ? mensajeEscalamiento(dependencia) : verificacion.respuesta;
 
     // 5. Registrar todo en una sola transaccion (si la IA fallo antes, no se escribio nada).
@@ -125,8 +128,7 @@ function crearOrquestador({ ia, pool }) {
       await cliente.query('COMMIT');
       return {
         id_conversacion: idConv,
-        respuesta: textoRespuesta,
-        dependencia: dependencia ? { id_dependencia: dependencia.id_dependencia, nombre: dependencia.nombre } : null,
+        ...formatoRespuesta({ mensaje: textoRespuesta, dependencia }),
         escalada,
       };
     } catch (err) {

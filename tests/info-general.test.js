@@ -91,7 +91,7 @@ describe('información general de TEINCO para el asistente', () => {
     const r = await chat(ctx.api, '¿Tienen sede en Medellín?');
     assert.equal(r.body.escalada, true);
     assert.equal(r.body.dependencia.nombre, 'Información general');
-    assert.match(r.body.respuesta, /601 743 32 00/);
+    assert.match(r.body.contacto.texto, /601 743 32 00/);
     assert.doesNotMatch(r.body.respuesta, /Medellín/, 'no afirma nada sobre una sede que no existe en la información');
   });
 

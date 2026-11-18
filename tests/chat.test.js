@@ -111,8 +111,8 @@ describe('Chat: casos de escalamiento controlados con una IA de prueba', () => {
       const r = await chat(ctx.api, 'Quiero una cita');
       assert.equal(r.body.escalada, true);
       assert.equal(r.body.dependencia.nombre, 'Bienestar');
-      assert.match(r.body.respuesta, /comunicarte directamente con Bienestar/);
-      assert.match(r.body.respuesta, /contacto\.bienestar@ejemplo\.invalid/);
+      assert.match(r.body.respuesta, /comunicarte directamente con la dependencia indicada/);
+      assert.match(r.body.contacto.texto, /contacto\.bienestar@ejemplo\.invalid/);
       const { rows } = await ctx.pool.query('SELECT motivo FROM escalamiento');
       assert.equal(rows[0].motivo, 'informacion_insuficiente');
       const cons = await ctx.pool.query('SELECT clasificacion FROM consulta');

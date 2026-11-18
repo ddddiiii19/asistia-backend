@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const { HttpError } = require('../errores');
 const { textoObligatorio, idSesion, entero, enteroOpcional } = require('../validar');
 const { requiereUsuario } = require('../middleware/auth');
+const { formatoRespuesta, sqlDependenciaDelMensaje, aplicarFormatoMensajes } = require('../ia/contacto');
 
 function rutasPublicas({ pool, orquestador, authOpciones }) {
   const router = express.Router();
@@ -46,8 +47,11 @@ function rutasPublicas({ pool, orquestador, authOpciones }) {
     const id = entero(req.params.id, 'id');
     const conv = await pool.query('SELECT id_conversacion, fecha_inicio FROM conversacion WHERE id_conversacion = $1 AND id_usuario = $2', [id, req.usuario.id]);
     if (conv.rowCount === 0) throw new HttpError(404, 'conversacion_no_encontrada', 'La conversación no existe para esta cuenta.');
-    const mensajes = await pool.query('SELECT id_mensaje, emisor, contenido, fecha FROM mensaje WHERE id_conversacion = $1 ORDER BY id_mensaje', [id]);
-    res.json({ ...conv.rows[0], mensajes: mensajes.rows });
+    // Q8: cada respuesta del asistente se muestra en el formato estándar (mensaje, contacto y dependencia).
+    const mensajes = await pool.query(
+      `SELECT m.id_mensaje, m.emisor, m.contenido, m.fecha, ${sqlDependenciaDelMensaje('m')} AS id_dependencia_respuesta
+         FROM mensaje m WHERE m.id_conversacion = $1 ORDER BY m.id_mensaje`, [id]);
+    res.json({ ...conv.rows[0], mensajes: await aplicarFormatoMensajes(pool, mensajes.rows) });
   });
 
   // RF-10 - Consultar preguntas frecuentes.
@@ -64,10 +68,16 @@ function rutasPublicas({ pool, orquestador, authOpciones }) {
   router.post('/faq/:id/consulta', requiereUsuario(authOpciones), async (req, res) => {
     const id = entero(req.params.id, 'id');
     const { rows } = await pool.query(
-      `UPDATE pregunta_frecuente SET frecuencia = frecuencia + 1 WHERE id_faq = $1
-       RETURNING id_faq, pregunta, respuesta`, [id]);
+      `WITH f AS (
+         UPDATE pregunta_frecuente SET frecuencia = frecuencia + 1 WHERE id_faq = $1
+         RETURNING id_faq, id_dependencia, pregunta, respuesta
+       )
+       SELECT f.id_faq, f.pregunta, f.respuesta, d.id_dependencia, d.nombre, d.contacto_responsable, d.correos, d.telefono
+         FROM f JOIN dependencia d ON d.id_dependencia = f.id_dependencia`, [id]);
     if (rows.length === 0) throw new HttpError(404, 'faq_no_encontrada', 'La pregunta frecuente no existe.');
-    res.json(rows[0]);
+    const fila = rows[0];
+    // Q8: misma estructura que el chat: respuesta (mensaje), contacto y dependencia.
+    res.json({ id_faq: fila.id_faq, pregunta: fila.pregunta, ...formatoRespuesta({ mensaje: fila.respuesta, dependencia: fila }) });
   });
 
   return router;

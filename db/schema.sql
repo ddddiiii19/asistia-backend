@@ -1,6 +1,7 @@
 -- AsistIA - Esquema de base de datos (PostgreSQL).
 -- Q4: autenticación para los roles Usuario y Administrador, además del alcance administrativo interno.
 -- Q6: consulta.tiempo_respuesta_ms para los reportes (ver también db/migracion-q6.sql).
+-- Q8: dependencia.correos y dependencia.telefono (contacto estructurado; ver también db/migracion-q8.sql).
 -- ATENCIÓN: este script elimina y vuelve a crear las tablas (reinicia la base de datos).
 
 DROP TABLE IF EXISTS token_recuperacion_contrasena, escalamiento, consulta, mensaje, conversacion,
@@ -11,7 +12,9 @@ CREATE TABLE dependencia (
   id_dependencia       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre               VARCHAR(100) NOT NULL UNIQUE,
   descripcion          TEXT,
-  contacto_responsable VARCHAR(150)
+  contacto_responsable VARCHAR(150),
+  correos              TEXT[] NOT NULL DEFAULT '{}',
+  telefono             VARCHAR(100)
 );
 
 CREATE TABLE informacion_institucional (

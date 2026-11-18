@@ -2,7 +2,8 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { HttpError } = require('../errores');
 const { soloGlobal } = require('../middleware/auth');
-const { textoObligatorio, entero, enteroOpcional, fechaOpcional, validarCorreo, validarNuevaContrasena } = require('../validar');
+const { textoObligatorio, entero, enteroOpcional, fechaOpcional, validarCorreo, validarNuevaContrasena, validarContactoDependencia, normalizarNombre } = require('../validar');
+const { componerTextoContacto, sqlDependenciaDelMensaje, aplicarFormatoMensajes } = require('../ia/contacto');
 
 // Alcance de consulta segun el rol: el administrador global ve todo (o filtra por dependencia);
 // el administrador de una dependencia solo consulta los datos de su propia dependencia.
@@ -37,6 +38,28 @@ function mensajeVisible(alias, conversacion, param) {
                                  FROM consulta c WHERE c.id_conversacion = ${conversacion} AND c.id_dependencia = ${param}::int))`;
 }
 
+// Q8: el administrador global modifica contenido de cualquier dependencia; el de una dependencia, solo el de la suya.
+function permitirEscritura(req, idDependencia) {
+  if (req.admin.rol === 'global') return;
+  if (req.admin.id_dependencia !== idDependencia) {
+    throw new HttpError(403, 'fuera_de_alcance', 'Solo puedes modificar el contenido de tu dependencia.');
+  }
+}
+
+// Dependencia destino de un registro nuevo: la indicada (global) o, si el administrador es de una dependencia y no la
+// indica, la suya.
+function dependenciaDestino(req, valor) {
+  if (req.admin.rol === 'dependencia' && (valor === undefined || valor === null || valor === '')) return req.admin.id_dependencia;
+  return entero(valor, 'id_dependencia');
+}
+
+// Dependencia a la que pertenece un registro existente (404 si no existe).
+async function dependenciaDelRegistro(pool, tabla, columnaId, id) {
+  const { rows } = await pool.query(`SELECT id_dependencia FROM ${tabla} WHERE ${columnaId} = $1`, [id]);
+  if (rows.length === 0) throw new HttpError(404, 'no_encontrado', 'El registro no existe.');
+  return rows[0].id_dependencia;
+}
+
 function periodo(req) {
   const desde = fechaOpcional(req.query.desde, 'desde');
   const hasta = fechaOpcional(req.query.hasta, 'hasta');
@@ -57,7 +80,7 @@ const FILTRO_CONSULTA = `($1::int IS NULL OR c.id_dependencia = $1)
 function rutasAdmin({ pool }) {
   const router = express.Router();
 
-  // ---------- RF-12 Informacion institucional (consultar: ambos roles; modificar: solo global) ----------
+  // ---------- RF-12 Informacion institucional (consultar y modificar: global, o la propia dependencia) ----------
   router.get('/informacion', async (req, res) => {
     const dep = dependenciaEnAlcance(req);
     const { rows } = await pool.query(
@@ -67,33 +90,40 @@ function rutasAdmin({ pool }) {
     res.json(rows);
   });
 
-  router.post('/informacion', soloGlobal, async (req, res) => {
+  router.post('/informacion', async (req, res) => {
     const b = req.body || {};
+    const idDependencia = dependenciaDestino(req, b.id_dependencia);
+    permitirEscritura(req, idDependencia);
     const { rows } = await pool.query(
       'INSERT INTO informacion_institucional (id_dependencia, titulo, contenido) VALUES ($1, $2, $3) RETURNING *',
-      [entero(b.id_dependencia, 'id_dependencia'), textoObligatorio(b.titulo, 'titulo', 150), textoObligatorio(b.contenido, 'contenido')]);
+      [idDependencia, textoObligatorio(b.titulo, 'titulo', 150), textoObligatorio(b.contenido, 'contenido')]);
     res.status(201).json(rows[0]);
   });
 
-  router.put('/informacion/:id', soloGlobal, async (req, res) => {
+  router.put('/informacion/:id', async (req, res) => {
     const b = req.body || {};
+    const id = entero(req.params.id, 'id');
+    permitirEscritura(req, await dependenciaDelRegistro(pool, 'informacion_institucional', 'id_info', id));
+    const nueva = enteroOpcional(b.id_dependencia, 'id_dependencia');
+    if (nueva) permitirEscritura(req, nueva);
     const { rows } = await pool.query(
       `UPDATE informacion_institucional
           SET titulo = $2, contenido = $3, id_dependencia = COALESCE($4, id_dependencia), fecha_actualizacion = CURRENT_TIMESTAMP
         WHERE id_info = $1 RETURNING *`,
-      [entero(req.params.id, 'id'), textoObligatorio(b.titulo, 'titulo', 150), textoObligatorio(b.contenido, 'contenido'),
-      enteroOpcional(b.id_dependencia, 'id_dependencia')]);
+      [id, textoObligatorio(b.titulo, 'titulo', 150), textoObligatorio(b.contenido, 'contenido'), nueva]);
     if (rows.length === 0) throw new HttpError(404, 'no_encontrado', 'El registro no existe.');
     res.json(rows[0]);
   });
 
-  router.delete('/informacion/:id', soloGlobal, async (req, res) => {
-    const r = await pool.query('DELETE FROM informacion_institucional WHERE id_info = $1', [entero(req.params.id, 'id')]);
+  router.delete('/informacion/:id', async (req, res) => {
+    const id = entero(req.params.id, 'id');
+    permitirEscritura(req, await dependenciaDelRegistro(pool, 'informacion_institucional', 'id_info', id));
+    const r = await pool.query('DELETE FROM informacion_institucional WHERE id_info = $1', [id]);
     if (r.rowCount === 0) throw new HttpError(404, 'no_encontrado', 'El registro no existe.');
     res.status(204).end();
   });
 
-  // ---------- RF-14 Preguntas frecuentes (consultar: ambos roles; modificar: solo global) ----------
+  // ---------- RF-14 Preguntas frecuentes (consultar y modificar: global, o la propia dependencia) ----------
   router.get('/faq', async (req, res) => {
     const dep = dependenciaEnAlcance(req);
     const { rows } = await pool.query(
@@ -103,27 +133,34 @@ function rutasAdmin({ pool }) {
     res.json(rows);
   });
 
-  router.post('/faq', soloGlobal, async (req, res) => {
+  router.post('/faq', async (req, res) => {
     const b = req.body || {};
+    const idDependencia = dependenciaDestino(req, b.id_dependencia);
+    permitirEscritura(req, idDependencia);
     const { rows } = await pool.query(
       'INSERT INTO pregunta_frecuente (id_dependencia, pregunta, respuesta) VALUES ($1, $2, $3) RETURNING *',
-      [entero(b.id_dependencia, 'id_dependencia'), textoObligatorio(b.pregunta, 'pregunta', 255), textoObligatorio(b.respuesta, 'respuesta')]);
+      [idDependencia, textoObligatorio(b.pregunta, 'pregunta', 255), textoObligatorio(b.respuesta, 'respuesta')]);
     res.status(201).json(rows[0]);
   });
 
-  router.put('/faq/:id', soloGlobal, async (req, res) => {
+  router.put('/faq/:id', async (req, res) => {
     const b = req.body || {};
+    const id = entero(req.params.id, 'id');
+    permitirEscritura(req, await dependenciaDelRegistro(pool, 'pregunta_frecuente', 'id_faq', id));
+    const nueva = enteroOpcional(b.id_dependencia, 'id_dependencia');
+    if (nueva) permitirEscritura(req, nueva);
     const { rows } = await pool.query(
       `UPDATE pregunta_frecuente SET pregunta = $2, respuesta = $3, id_dependencia = COALESCE($4, id_dependencia)
         WHERE id_faq = $1 RETURNING *`,
-      [entero(req.params.id, 'id'), textoObligatorio(b.pregunta, 'pregunta', 255), textoObligatorio(b.respuesta, 'respuesta'),
-      enteroOpcional(b.id_dependencia, 'id_dependencia')]);
+      [id, textoObligatorio(b.pregunta, 'pregunta', 255), textoObligatorio(b.respuesta, 'respuesta'), nueva]);
     if (rows.length === 0) throw new HttpError(404, 'no_encontrado', 'El registro no existe.');
     res.json(rows[0]);
   });
 
-  router.delete('/faq/:id', soloGlobal, async (req, res) => {
-    const r = await pool.query('DELETE FROM pregunta_frecuente WHERE id_faq = $1', [entero(req.params.id, 'id')]);
+  router.delete('/faq/:id', async (req, res) => {
+    const id = entero(req.params.id, 'id');
+    permitirEscritura(req, await dependenciaDelRegistro(pool, 'pregunta_frecuente', 'id_faq', id));
+    const r = await pool.query('DELETE FROM pregunta_frecuente WHERE id_faq = $1', [id]);
     if (r.rowCount === 0) throw new HttpError(404, 'no_encontrado', 'El registro no existe.');
     res.status(204).end();
   });
@@ -165,7 +202,7 @@ function rutasAdmin({ pool }) {
     if (conv.rowCount === 0) throw new HttpError(404, 'conversacion_no_encontrada', 'La conversación no existe o está fuera de tu alcance.');
     const aut = dependenciaAutorizada(req);
     const mensajes = await pool.query(
-      `SELECT m.id_mensaje, m.emisor, m.contenido, m.fecha FROM mensaje m
+      `SELECT m.id_mensaje, m.emisor, m.contenido, m.fecha, ${sqlDependenciaDelMensaje('m')} AS id_dependencia_respuesta FROM mensaje m
         WHERE m.id_conversacion = $2 AND ${mensajeVisible('m', '$2::int', '$1')} ORDER BY m.id_mensaje`, [aut, id]);
     // Q6: ficha de cada consulta de la conversación (solo las de la dependencia en alcance), para el historial del panel.
     const consultas = await pool.query(
@@ -177,7 +214,8 @@ function rutasAdmin({ pool }) {
          LEFT JOIN escalamiento e ON e.id_consulta = c.id_consulta
         WHERE c.id_conversacion = $2 AND ($1::int IS NULL OR c.id_dependencia = $1)
         ORDER BY c.id_consulta`, [aut, id]);
-    res.json({ ...conv.rows[0], mensajes: mensajes.rows, consultas: consultas.rows });
+    // Q8: las respuestas del asistente se muestran en el formato estándar (mensaje, contacto y dependencia).
+    res.json({ ...conv.rows[0], mensajes: await aplicarFormatoMensajes(pool, mensajes.rows), consultas: consultas.rows });
   });
 
   // ---------- RF-15 Reportes de interacciones (con filtros de RF-17) ----------
@@ -290,10 +328,9 @@ function rutasAdmin({ pool }) {
     });
   });
 
-  // Crear cuentas del rol Usuario. Solo el administrador global puede hacerlo.
-  // No se permite autorregistro público ni asignar roles desde el formulario.
-  router.post('/cuentas/usuarios', soloGlobal, async (req, res) => {
-    const b = req.body || {};
+  // Valida los datos comunes de una cuenta nueva y comprueba que el nombre de usuario y el correo no existan
+  // (ni como Usuario ni como administrador).
+  async function datosCuentaNueva(b) {
     const nombreUsuario = textoObligatorio(b.nombre_usuario, 'nombre_usuario', 50);
     const correo = validarCorreo(b.correo);
     const contrasena = validarNuevaContrasena(b.contrasena);
@@ -306,12 +343,122 @@ function rutasAdmin({ pool }) {
     if (existe.rowCount > 0) {
       throw new HttpError(409, 'cuenta_existente', 'Ya existe una cuenta con ese nombre de usuario o correo.');
     }
-    const hash = await bcrypt.hash(contrasena, 12);
+    return { nombreUsuario, correo, hash: await bcrypt.hash(contrasena, 12) };
+  }
+
+  // Crear cuentas del rol Usuario. Solo el administrador global puede hacerlo.
+  // No se permite autorregistro público ni asignar roles desde el formulario.
+  router.post('/cuentas/usuarios', soloGlobal, async (req, res) => {
+    const { nombreUsuario, correo, hash } = await datosCuentaNueva(req.body || {});
     const { rows } = await pool.query(
       `INSERT INTO cuenta_usuario (nombre_usuario, correo, contrasena_hash)
        VALUES ($1, $2, $3) RETURNING id_usuario, nombre_usuario, correo, activo, fecha_creacion`,
       [nombreUsuario, correo, hash]);
     res.status(201).json({ cuenta: { tipo: 'usuario', rol: 'usuario', ...rows[0] } });
+  });
+
+  // ---------- Q8: dependencias (listar y editar descripción y contacto) ----------
+  const COLUMNAS_DEPENDENCIA = `d.id_dependencia, d.nombre, d.descripcion, d.correos, d.telefono,
+      (SELECT count(*)::int FROM informacion_institucional i WHERE i.id_dependencia = d.id_dependencia) AS total_informacion,
+      (SELECT count(*)::int FROM pregunta_frecuente f WHERE f.id_dependencia = d.id_dependencia) AS total_faq`;
+
+  // El global ve todas; el de una dependencia, solo la suya.
+  router.get('/dependencias', async (req, res) => {
+    const aut = dependenciaAutorizada(req);
+    const { rows } = await pool.query(
+      `SELECT ${COLUMNAS_DEPENDENCIA} FROM dependencia d WHERE ($1::int IS NULL OR d.id_dependencia = $1) ORDER BY d.id_dependencia`, [aut]);
+    res.json(rows);
+  });
+
+  // Solo se edita la descripción (la usa la IA para clasificar) y el contacto. El nombre no cambia y la dependencia no se elimina.
+  router.put('/dependencias/:id', async (req, res) => {
+    const b = req.body || {};
+    const id = entero(req.params.id, 'id');
+    permitirEscritura(req, id);
+    const cambiaContacto = b.correos !== undefined || b.telefono !== undefined;
+    if (b.descripcion === undefined && !cambiaContacto) {
+      throw new HttpError(400, 'dato_invalido', "Indica 'descripcion' o el contacto ('correos' y 'telefono') que deseas actualizar.");
+    }
+    const actual = await pool.query('SELECT id_dependencia FROM dependencia WHERE id_dependencia = $1', [id]);
+    if (actual.rowCount === 0) throw new HttpError(404, 'dependencia_no_encontrada', 'La dependencia indicada no existe.');
+    const sets = [];
+    const valores = [id];
+    if (b.descripcion !== undefined) {
+      valores.push(textoObligatorio(b.descripcion, 'descripcion', 500));
+      sets.push(`descripcion = $${valores.length}`);
+    }
+    if (cambiaContacto) {
+      const { correos, telefono } = validarContactoDependencia(b);
+      valores.push(correos, telefono, componerTextoContacto(correos, telefono));
+      sets.push(`correos = $${valores.length - 2}`, `telefono = $${valores.length - 1}`, `contacto_responsable = $${valores.length}`);
+    }
+    await pool.query(`UPDATE dependencia SET ${sets.join(', ')} WHERE id_dependencia = $1`, valores);
+    const { rows } = await pool.query(`SELECT ${COLUMNAS_DEPENDENCIA} FROM dependencia d WHERE d.id_dependencia = $1`, [id]);
+    res.json(rows[0]);
+  });
+
+  // Q7/Q8: crear la cuenta de una dependencia (administrador con alcance de dependencia). Solo el administrador global.
+  // El rol siempre es 'dependencia': desde este endpoint no se puede crear otro administrador global.
+  // Q8: el nombre de la dependencia se escribe libremente: si no existe se crea en la misma transacción con su descripción
+  // y su contacto (correos y teléfono); sus apartados (información, preguntas frecuentes, historial y reportes) quedan
+  // limitados a ella. Si llega `id_dependencia` (forma de Q7) la cuenta se asigna a una dependencia existente.
+  router.post('/cuentas/administradores-dependencia', soloGlobal, async (req, res) => {
+    const b = req.body || {};
+    if (b.id_dependencia !== undefined && b.id_dependencia !== null && b.id_dependencia !== '') {
+      const idDependencia = entero(b.id_dependencia, 'id_dependencia');
+      const dep = await pool.query('SELECT id_dependencia, nombre FROM dependencia WHERE id_dependencia = $1', [idDependencia]);
+      if (dep.rowCount === 0) throw new HttpError(404, 'dependencia_no_encontrada', 'La dependencia indicada no existe.');
+      const { nombreUsuario, correo, hash } = await datosCuentaNueva(b);
+      const { rows } = await pool.query(
+        `INSERT INTO administrador (nombre_usuario, correo, contrasena_hash, rol, id_dependencia)
+         VALUES ($1, $2, $3, 'dependencia', $4)
+         RETURNING id_administrador, nombre_usuario, correo, id_dependencia`,
+        [nombreUsuario, correo, hash, idDependencia]);
+      return res.status(201).json({
+        cuenta: { tipo: 'administrador', rol: 'administrador', alcance_admin: 'dependencia', ...rows[0], dependencia: dep.rows[0].nombre },
+      });
+    }
+
+    const nombre = textoObligatorio(b.nombre_dependencia, 'nombre_dependencia', 100).replace(/\s+/g, ' ');
+    if (nombre.length < 3 || !/\p{L}/u.test(nombre)) {
+      throw new HttpError(400, 'dato_invalido', "El campo 'nombre_dependencia' debe tener al menos 3 caracteres e incluir letras.");
+    }
+    const descripcion = textoObligatorio(b.descripcion, 'descripcion', 500);
+    const { correos, telefono } = validarContactoDependencia(b);
+    const existentes = (await pool.query('SELECT nombre FROM dependencia')).rows;
+    if (existentes.some((d) => normalizarNombre(d.nombre) === normalizarNombre(nombre))) {
+      throw new HttpError(409, 'dependencia_existente', 'Ya existe una dependencia con ese nombre.');
+    }
+    const { nombreUsuario, correo, hash } = await datosCuentaNueva(b);
+
+    const cliente = await pool.connect();
+    try {
+      await cliente.query('BEGIN');
+      const dep = (await cliente.query(
+        `INSERT INTO dependencia (nombre, descripcion, contacto_responsable, correos, telefono)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id_dependencia, nombre, descripcion, correos, telefono`,
+        [nombre, descripcion, componerTextoContacto(correos, telefono), correos, telefono])).rows[0];
+      const cuenta = (await cliente.query(
+        `INSERT INTO administrador (nombre_usuario, correo, contrasena_hash, rol, id_dependencia)
+         VALUES ($1, $2, $3, 'dependencia', $4)
+         RETURNING id_administrador, nombre_usuario, correo, id_dependencia`,
+        [nombreUsuario, correo, hash, dep.id_dependencia])).rows[0];
+      await cliente.query('COMMIT');
+      return res.status(201).json({
+        cuenta: { tipo: 'administrador', rol: 'administrador', alcance_admin: 'dependencia', ...cuenta, dependencia: dep.nombre },
+        dependencia: { ...dep, total_informacion: 0, total_faq: 0 },
+      });
+    } catch (err) {
+      await cliente.query('ROLLBACK');
+      // Carreras entre dos solicitudes simultáneas: la base de datos también impide duplicados.
+      if (err && err.code === '23505') {
+        if (/dependencia/.test(String(err.constraint || err.table || ''))) throw new HttpError(409, 'dependencia_existente', 'Ya existe una dependencia con ese nombre.');
+        throw new HttpError(409, 'cuenta_existente', 'Ya existe una cuenta con ese nombre de usuario o correo.');
+      }
+      throw err;
+    } finally {
+      cliente.release();
+    }
   });
 
   return router;

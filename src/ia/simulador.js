@@ -38,6 +38,17 @@ function crearSimulador() {
         const dep = dependencias.find((d) => normalizar(d.nombre).startsWith(regla.nombre));
         if (clave && dep) return { dependencia_id: dep.id_dependencia, tema: clave, intencion: 'consulta' };
       }
+      // Q8: dependencias creadas desde el panel (sin reglas propias arriba): se comparan las palabras de la consulta
+      // con su nombre y descripción. Las dependencias con reglas fijas no entran aquí.
+      const propias = dependencias.filter((d) => !PALABRAS_POR_DEPENDENCIA.some((r) => normalizar(d.nombre).startsWith(r.nombre)));
+      const palabras = limpio.split(' ').filter((t) => t.length >= 5 && !IGNORAR.has(t));
+      let mejor = null;
+      for (const d of propias) {
+        const ficha = normalizar(`${d.nombre} ${d.descripcion || ''}`);
+        const coincidencias = palabras.filter((t) => ficha.includes(t.slice(0, 5)));
+        if (coincidencias.length > 0 && (!mejor || coincidencias.length > mejor.coincidencias.length)) mejor = { d, coincidencias };
+      }
+      if (mejor) return { dependencia_id: mejor.d.id_dependencia, tema: mejor.coincidencias[0], intencion: 'consulta' };
       return { dependencia_id: null, tema: 'sin clasificar', intencion: 'consulta' };
     },
     async generar({ mensaje, contexto }) {

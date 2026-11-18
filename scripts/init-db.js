@@ -13,6 +13,8 @@ async function inicializar({ pool, passwordAdmin, passwordUsuario = passwordAdmi
   const leer = (f) => fs.readFileSync(path.join(__dirname, '..', 'db', f), 'utf8');
   await pool.query(leer('schema.sql'));
   await pool.query(leer('seed.sql'));
+  // Q8: llena el contacto estructurado (correos y teléfono) de las dependencias de demostración.
+  await require('./migrar-q8').migrarQ8(pool);
 
   const hashAdmin = await bcrypt.hash(passwordAdmin, 12);
   const hashUsuario = await bcrypt.hash(passwordUsuario, 12);

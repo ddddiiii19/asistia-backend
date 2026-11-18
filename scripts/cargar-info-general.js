@@ -8,6 +8,7 @@
 // - No borra nada: no toca las demás dependencias ni lo que un administrador haya agregado.
 // - Al actualizar una pregunta frecuente conserva su contador de uso.
 const { INFO_GENERAL } = require('../db/info-general-teinco');
+const { extraerContacto } = require('../src/ia/contacto');
 
 async function cargarInfoGeneral({ pool, datos = INFO_GENERAL }) {
   const cliente = await pool.connect();
@@ -26,6 +27,13 @@ async function cargarInfoGeneral({ pool, datos = INFO_GENERAL }) {
         'INSERT INTO dependencia (nombre, descripcion, contacto_responsable) VALUES ($1, $2, $3) RETURNING id_dependencia',
         [d.nombre, d.descripcion, d.contacto_responsable])).rows[0].id_dependencia;
       resumen.dependencia = 'creada';
+    }
+    // Q8: mantiene el contacto estructurado (correos y teléfono) de acuerdo con contacto_responsable.
+    // Solo si la base ya tiene esas columnas (npm run db:migrar-q8).
+    const conColumnas = await cliente.query("SELECT 1 FROM information_schema.columns WHERE table_name = 'dependencia' AND column_name = 'correos'");
+    if (conColumnas.rowCount > 0) {
+      const contacto = extraerContacto(d.contacto_responsable);
+      await cliente.query('UPDATE dependencia SET correos = $2, telefono = $3 WHERE id_dependencia = $1', [idDependencia, contacto.correos, contacto.telefono]);
     }
 
     for (const i of datos.informacion) {

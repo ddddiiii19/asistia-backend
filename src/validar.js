@@ -58,4 +58,36 @@ function validarNuevaContrasena(valor) {
   return valor;
 }
 
-module.exports = { textoObligatorio, idSesion, entero, enteroOpcional, fechaOpcional, validarCorreo, validarNuevaContrasena };
+// Q8: contacto de una dependencia. `correos` es una lista (o un texto separado por comas, punto y coma o saltos de línea)
+// con al menos un correo válido; `telefono` es opcional. El texto resultante debe caber en contacto_responsable (150).
+function validarContactoDependencia(b) {
+  const crudo = Array.isArray(b.correos) ? b.correos : (typeof b.correos === 'string' ? b.correos.split(/[,;\n]+|\s+o\s+/i) : []);
+  const correos = [];
+  for (const c of crudo) {
+    if (typeof c !== 'string' || c.trim() === '') continue;
+    const correo = validarCorreo(c, 'correos');
+    if (!correos.includes(correo)) correos.push(correo);
+  }
+  if (correos.length === 0) throw new HttpError(400, 'dato_invalido', "El campo 'correos' debe incluir al menos un correo válido.");
+  if (correos.length > 5) throw new HttpError(400, 'dato_invalido', "El campo 'correos' no puede tener más de 5 correos.");
+  let telefono = null;
+  if (b.telefono !== undefined && b.telefono !== null && String(b.telefono).trim() !== '') {
+    if (typeof b.telefono !== 'string') throw new HttpError(400, 'dato_invalido', "El campo 'telefono' debe ser texto.");
+    telefono = b.telefono.trim().replace(/\s+/g, ' ');
+    // Admite varios números con su etiqueta (por ejemplo "601 743 32 00 · WhatsApp 301 333 79 56").
+    if (!/^[\p{L}\d\s+().,:·\/-]{7,100}$/u.test(telefono) || telefono.replace(/\D/g, '').length < 7) {
+      throw new HttpError(400, 'dato_invalido', "El campo 'telefono' debe ser un número de teléfono válido (por ejemplo 601 743 32 00); puede incluir varios números.");
+    }
+  }
+  const largo = `${correos.join(' o ')}${telefono ? ` · Tel. ${telefono}` : ''}`.length;
+  if (largo > 150) throw new HttpError(400, 'dato_invalido', 'El contacto (correos y teléfono) es demasiado largo: use menos correos o más cortos.');
+  return { correos, telefono };
+}
+
+// Nombre comparable de una dependencia: sin mayúsculas, tildes ni espacios repetidos.
+function normalizarNombre(nombre) {
+  return String(nombre).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+module.exports = {
+  validarContactoDependencia, normalizarNombre, textoObligatorio, idSesion, entero, enteroOpcional, fechaOpcional, validarCorreo, validarNuevaContrasena };
