@@ -104,6 +104,12 @@ function crearOrquestador({ ia, pool }) {
     // 4. Verificar que la respuesta tenga respaldo en la informacion institucional.
     const verificacion = verificarRespaldo({ dependencia, contexto, salida });
     const escalada = !verificacion.ok;
+    // Registro técnico (visible en los logs del servidor) del motivo del escalamiento, para diagnosticar por qué
+    // el asistente no pudo responder. No incluye el texto de la consulta ni datos del usuario.
+    // Se omite al correr las pruebas automáticas (el ejecutor de pruebas de Node define NODE_TEST_CONTEXT).
+    if (escalada && !process.env.NODE_TEST_CONTEXT) {
+      console.warn(`[escalamiento] motivo=${verificacion.motivo} dependencia=${dependencia ? dependencia.nombre : 'ninguna'} fuentes_disponibles=${contexto.length} ia=${ia.nombre}`);
+    }
     // Q8: se guarda solo el mensaje; el contacto (correo y teléfono) y la dependencia se componen aparte al responder y al mostrar el historial.
     const textoRespuesta = escalada ? mensajeEscalamiento(dependencia) : verificacion.respuesta;
 
